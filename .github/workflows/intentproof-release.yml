@@ -1,0 +1,59 @@
+name: IntentProof protected staging
+run-name: 'IntentProof ${{ inputs.release_id }}:${{ inputs.action }}:${{ inputs.attempt }}'
+on:
+  workflow_dispatch:
+    inputs:
+      release_id: {required: true, type: string}
+      attempt: {required: true, type: string}
+      action: {required: true, type: choice, options: [deploy, rollback]}
+      environment: {required: true, type: string}
+      authorization: {required: true, type: string}
+permissions:
+  contents: read
+concurrency:
+  group: intentproof-delivery-${{ inputs.environment }}
+  cancel-in-progress: false
+jobs:
+  protected-deploy:
+    environment: ${{ inputs.environment }}
+    runs-on: [self-hosted, intentproof-staging]
+    timeout-minutes: 20
+    env:
+      IP_CONTROL_REPOSITORY: ${{ github.repository }}
+      IP_CONTROL_SHA: ${{ github.sha }}
+      IP_ENVIRONMENT: ${{ inputs.environment }}
+      IP_RELEASE_ID: ${{ inputs.release_id }}
+      IP_ATTEMPT: ${{ inputs.attempt }}
+      IP_ACTION: ${{ inputs.action }}
+      IP_AUTHORIZATION: ${{ inputs.authorization }}
+      IP_PUBLIC_KEY: ${{ vars.INTENTPROOF_RELEASE_PUBLIC_KEY }}
+      IP_STATE_DIR: ${{ vars.INTENTPROOF_STATE_DIR }}
+      IP_BIND_PORT: ${{ vars.INTENTPROOF_BIND_PORT }}
+      IP_RUNTIME_ENV_FILE: ${{ vars.INTENTPROOF_RUNTIME_ENV_FILE }}
+      IP_EVIDENCE_TOKEN: ${{ secrets.INTENTPROOF_EVIDENCE_TOKEN }}
+      DOCKER_CONFIG: ${{ runner.temp }}/intentproof-registry
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'PyJWT[crypto]==2.15.1' 'httpx==0.28.1'
+      - name: Authenticate scoped registry reader
+        env:
+          REGISTRY_TOKEN: ${{ secrets.INTENTPROOF_REGISTRY_TOKEN }}
+          REGISTRY_USER: ${{ vars.INTENTPROOF_REGISTRY_USER }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+      - name: Execute signed, freshly verified staging delivery
+        run: python .intentproof/deploy.py > result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: intentproof-release-${{ inputs.release_id }}-${{ inputs.action }}-${{ inputs.attempt }}
+          path: result.json
+          if-no-files-found: error
+      - name: Remove registry authentication
+        if: always()
+        run: docker logout ghcr.io
